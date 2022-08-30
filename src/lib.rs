@@ -8,14 +8,11 @@ use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::task::{JoinError, JoinHandle};
 
 type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type DeadQueue = deadqueue::limited::Queue<BoxFuture>;
 
 pub struct Queue {
-    runtime: Handle,
-    enqueue: mpsc::Sender<BoxFuture>,
-    semaphore: Arc<Semaphore>,
-    scheduler: JoinHandle<()>,
-    queue_capacity: usize,
-    concurrency: usize,
+    workers: Vec<JoinHandle<()>>,
+    queue: Arc<DeadQueue>,
     tasks_running: Arc<AtomicUsize>,
 }
 
@@ -30,6 +27,13 @@ pub struct Stats {
 
 impl Queue {
     pub fn new(runtime: Handle, queue_capacity: usize, concurrency: usize) -> Self {
+        let tasks_running = Arc::new(AtomicUsize::new(0));
+        let queue = Arc::new(DeadQueue::new(queue_capacity));
+
+        let workers = (0..concurrency)
+            .map(|_| runtime.spawn(Self::worker(Arc::clone(&tasks_running), Arc::clone(&queue))))
+            .collect();
+
         let (enqueue, receive) = mpsc::channel(queue_capacity);
         let semaphore = Arc::new(Semaphore::new(concurrency));
         let tasks_running = Arc::new(AtomicUsize::new(0));
@@ -91,27 +95,15 @@ impl Queue {
         Ok(receiver)
     }
 
-    async fn scheduler(
-        runtime: Handle,
-        semaphore: Arc<Semaphore>,
-        tasks_running: Arc<AtomicUsize>,
-        mut receive: mpsc::Receiver<BoxFuture>,
-    ) {
+    async fn worker(tasks_running: Arc<AtomicUsize>, queue: Arc<DeadQueue>) {
         loop {
-            let permit = match semaphore.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => return,
-            };
+            let future = queue.pop().await;
 
-            let future = match receive.recv().await {
-                Some(future) => future,
-                None => return,
-            };
+            tasks_running.fetch_add(1, Ordering::Relaxed);
 
-            runtime.spawn(async move {
-                future.await;
-                drop(permit)
-            });
+            future.await;
+
+            tasks_running.fetch_sub(1, Ordering::Relaxed);
         }
     }
 }
