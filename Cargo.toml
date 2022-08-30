@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-deadqueue = { version = "0.2.3", default-features = false, features = ["limited"] }
-tokio = { version = "1.20.1", features = ["rt"] }
+async-channel = "1.7.1"
+tokio = { version = "1.20.1", features = ["rt", "sync"] }
 
 [dev-dependencies]
 tokio = { version = "1.20.1", features = ["macros", "time"] }

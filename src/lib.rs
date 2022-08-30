@@ -3,101 +3,93 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use async_channel::{Receiver, Sender, TrySendError};
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot, Semaphore};
-use tokio::task::{JoinError, JoinHandle};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-type DeadQueue = deadqueue::limited::Queue<BoxFuture>;
 
 pub struct Queue {
     workers: Vec<JoinHandle<()>>,
-    queue: Arc<DeadQueue>,
+    sender: Sender<BoxFuture>,
     tasks_running: Arc<AtomicUsize>,
 }
 
 #[non_exhaustive]
 #[derive(Debug)]
 pub struct Stats {
-    pub queue_free: usize,
-    pub queue_used: usize,
-    pub tasks_free: usize,
-    pub tasks_used: usize,
+    pub queue_capacity: Option<usize>,
+    pub queue_len: usize,
+    pub workers: usize,
+    pub active_workers: usize,
 }
 
 impl Queue {
-    pub fn new(runtime: Handle, queue_capacity: usize, concurrency: usize) -> Self {
+    pub fn new(runtime: Handle, workers: usize, queue_capacity: Option<usize>) -> Self {
         let tasks_running = Arc::new(AtomicUsize::new(0));
-        let queue = Arc::new(DeadQueue::new(queue_capacity));
+        let (sender, receiver) = match queue_capacity {
+            Some(bound) => async_channel::bounded(bound),
+            None => async_channel::unbounded(),
+        };
 
-        let workers = (0..concurrency)
-            .map(|_| runtime.spawn(Self::worker(Arc::clone(&tasks_running), Arc::clone(&queue))))
+        let workers = (0..workers)
+            .map(|_| runtime.spawn(Self::worker(Arc::clone(&tasks_running), receiver.clone())))
             .collect();
 
-        let (enqueue, receive) = mpsc::channel(queue_capacity);
-        let semaphore = Arc::new(Semaphore::new(concurrency));
-        let tasks_running = Arc::new(AtomicUsize::new(0));
-
-        let scheduler = runtime.spawn(Self::scheduler(
-            runtime.clone(),
-            Arc::clone(&semaphore),
-            Arc::clone(&tasks_running),
-            receive,
-        ));
-
         Self {
-            runtime,
-            enqueue,
-            semaphore,
-            scheduler,
-            queue_capacity,
-            concurrency,
+            sender,
+            workers,
             tasks_running,
         }
     }
 
-    pub async fn close(self) -> Result<(), JoinError> {
+    pub async fn close(self) {
         let Self {
-            runtime: _runtime,
-            enqueue,
-            semaphore: _semaphore,
-            scheduler,
-            ..
+            workers, sender, ..
         } = self;
-        drop(enqueue);
-        scheduler.await
-    }
-
-    pub fn stats(&self) -> Stats {
-        let queue_free = self.enqueue.capacity();
-        let tasks_used = self.tasks_running.load(Ordering::Relaxed);
-        Stats {
-            queue_free,
-            queue_used: self.queue_capacity - queue_free,
-            tasks_free: self.concurrency - tasks_used,
-            tasks_used,
+        drop(sender);
+        for worker in workers {
+            // NOTE:
+            // `JoinError` has two variants internally:
+            // 1) a panic 2) cancellation.
+            // We never cancel the worker tasks ourselves, though they might
+            // have panic-ed.
+            worker.await.unwrap();
         }
     }
 
-    pub fn enqueue<F, T>(
-        &self,
-        future: F,
-    ) -> Result<oneshot::Receiver<T>, mpsc::error::TrySendError<()>>
+    pub fn stats(&self) -> Stats {
+        let active_workers = self.tasks_running.load(Ordering::Relaxed);
+        Stats {
+            queue_capacity: self.sender.capacity(),
+            queue_len: self.sender.len(),
+            workers: self.workers.len(),
+            active_workers,
+        }
+    }
+
+    pub fn enqueue<F, T>(&self, future: F) -> Result<oneshot::Receiver<T>, TrySendError<()>>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let permit = self.enqueue.try_reserve()?;
         let (send, receiver) = oneshot::channel();
-        permit.send(Box::pin(async move {
+        match self.sender.try_send(Box::pin(async move {
             send.send(future.await).ok();
-        }));
-        Ok(receiver)
+        })) {
+            Ok(_) => Ok(receiver),
+            Err(TrySendError::Full(_)) => Err(TrySendError::Full(())),
+            Err(TrySendError::Closed(_)) => Err(TrySendError::Closed(())),
+        }
     }
 
-    async fn worker(tasks_running: Arc<AtomicUsize>, queue: Arc<DeadQueue>) {
+    async fn worker(tasks_running: Arc<AtomicUsize>, receiver: Receiver<BoxFuture>) {
         loop {
-            let future = queue.pop().await;
+            let future = match receiver.recv().await {
+                Ok(future) => future,
+                Err(_) => return,
+            };
 
             tasks_running.fetch_add(1, Ordering::Relaxed);
 
