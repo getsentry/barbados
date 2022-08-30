@@ -1,0 +1,11 @@
+[package]
+name = "barbados"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+deadqueue = { version = "0.2.3", default-features = false, features = ["limited"] }
+tokio = { version = "1.20.1", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1.20.1", features = ["macros", "time"] }
