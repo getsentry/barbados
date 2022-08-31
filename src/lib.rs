@@ -72,7 +72,7 @@ impl Queue {
             // `JoinError` has two variants internally:
             // 1) a panic 2) cancellation.
             // We never cancel the worker tasks ourselves.
-            // But the tasks themselves could have panic-d.
+            // But the tasks themselves could have panicked.
             worker.await.unwrap();
         }
     }
@@ -90,8 +90,8 @@ impl Queue {
 
     /// Enqueue a new `future` onto this queue.
     ///
-    /// Returns either a [`QueueReceiver`] when a task was successfully
-    /// enqueued, or a [`TrySendError`] when the queue is full.
+    /// Returns either a [`QueueReceiver`] if a task was successfully
+    /// enqueued, or a [`TrySendError`] if the queue is full.
     pub fn enqueue<F, T>(&self, future: F) -> Result<QueueReceiver<T>, TrySendError<()>>
     where
         F: Future<Output = T> + Send + 'static,
