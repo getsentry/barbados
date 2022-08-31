@@ -3,6 +3,14 @@ name = "barbados"
 version = "0.1.0"
 edition = "2021"
 
+description = "A (bounded) queue with async workers"
+authors = ["Sentry <hello@sentry.io>"]
+license = "MIT"
+readme = "README.md"
+documentation = "https://docs.rs/barbados"
+homepage = "https://github.com/getsentry/barbados"
+repository = "https://github.com/getsentry/barbados"
+
 [dependencies]
 async-channel = "1.7.1"
 tokio = { version = "1.20.1", features = ["rt", "sync"] }
